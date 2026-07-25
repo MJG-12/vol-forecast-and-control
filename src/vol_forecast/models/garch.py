@@ -1,181 +1,181 @@
-import numpy as np
-import pandas as pd
-from vol_forecast.wf_config import WalkForwardConfig
-from arch import arch_model
-from .wf_util import get_train_slice, compute_start_pos
 from typing import Literal
 
+from arch import arch_model
+import numpy as np
+import pandas as pd
 
-RefitCandidate = tuple[float, float, float, float, float, float]
+from vol_forecast.features import TRADING_DAYS
 
-def _build_refit_candidate(
-    *,
-    res,
+
+GarchKind = Literal["garch", "gjr"]
+RefitState = tuple[float, float, float, float, float, float]
+PERSISTENCE_TOLERANCE = 1e-8
+
+
+def _validated_refit_state(
+    result,
     train: pd.Series,
-    kind: Literal["garch", "gjr"],
-    p_neg: float,
-    tol_ab: float,
-) -> RefitCandidate | None:
-    """Validates a refit result and returns a commit-ready candidate, else None."""
-    omega_new = float(res.params.get("omega", np.nan))
-    alpha_new = float(res.params.get("alpha[1]", np.nan))
-    beta_new  = float(res.params.get("beta[1]", np.nan))
-    gamma_new = float(res.params.get("gamma[1]", 0.0)) if kind == "gjr" else 0.0
-
-    if not (np.isfinite(omega_new) and np.isfinite(alpha_new) and np.isfinite(beta_new)):
-        return None
-    if kind == "gjr" and not np.isfinite(gamma_new):
-        return None
-
-    h_prev_new = float(res.conditional_volatility.iloc[-1] ** 2)
-    eps_prev_new = float(train.iloc[-1])
-    if not (np.isfinite(h_prev_new) and h_prev_new > 0.0 and np.isfinite(eps_prev_new)):
+    kind: GarchKind,
+) -> RefitState | None:
+    """Extracts a finite, non-explosive state from a successful `arch` fit."""
+    omega = float(result.params.get("omega", np.nan))
+    alpha = float(result.params.get("alpha[1]", np.nan))
+    beta = float(result.params.get("beta[1]", np.nan))
+    gamma = (
+        float(result.params.get("gamma[1]", np.nan))
+        if kind == "gjr"
+        else 0.0
+    )
+    values = np.array([omega, alpha, beta, gamma], dtype=float)
+    if not np.isfinite(values).all():
         return None
 
-    ab_new = (alpha_new + beta_new) if kind == "garch" else (alpha_new + beta_new + gamma_new * p_neg)
-    if not (np.isfinite(ab_new) and ab_new < 1.0 - tol_ab):
+    h_previous = float(result.conditional_volatility.iloc[-1] ** 2)
+    shock_previous = float(train.iloc[-1])
+    persistence = alpha + beta + (0.5 * gamma if kind == "gjr" else 0.0)
+    if (
+        not np.isfinite(h_previous)
+        or h_previous <= 0.0
+        or not np.isfinite(shock_previous)
+        or not 0.0 <= persistence <= 1.0 + PERSISTENCE_TOLERANCE
+    ):
         return None
 
-    return (omega_new, alpha_new, beta_new, gamma_new, h_prev_new, eps_prev_new)
+    return (
+        omega,
+        alpha,
+        beta,
+        gamma,
+        h_previous,
+        shock_previous,
+    )
 
 
-def walk_forward_garch_family_var(
-    df: pd.DataFrame,
-    ret_col: str,
-    kind: Literal["garch", "gjr"],
-    horizon: int = 20,
+def walk_forward_garch(
+    data: pd.DataFrame,
     *,
-    cfg: WalkForwardConfig | None = None,
-    ret_scale: float = 100.0,
-    dist: Literal["normal", "t"] = "t",
-    start_date: pd.Timestamp | None = None,
+    return_col: str,
+    kind: GarchKind,
+    horizon: int,
+    rolling_window: int,
+    refit_every: int,
+    output_name: str,
 ) -> tuple[pd.Series, dict[str, int]]:
     """
-    Walk-forward variance forecasts from GARCH(1,1) / GJR-GARCH(1,1).
+    Produces rolling GARCH(1,1) or GJR-GARCH(1,1) variance forecasts.
 
-    Forecasts are aligned at origin t using returns observed through t-1 (scaled by ret_scale).
-    This is a returns-only model, so `horizon` affects only the forecast aggregation: we average
-    the next `horizon` steps of the variance recursion to produce an annualized horizon-mean forecast.
+    Forecasts are aligned at origin t using returns observed through t-1.
+    Models use Student-t innovations and are refitted every `refit_every`
+    origins on a fixed rolling window. If a refit fails, the last valid
+    fitted state is retained and forecasting continues. Forecasting begins
+    immediately after the first complete rolling window.
 
-    Refitting / robustness:
-      - Refits every cfg.refit_every origins on a rolling/expanding window.
-      - On refit failure, retains the last valid fitted state and continues.
-      - If the one-step recursion is invalid (non-finite/non-positive) or fails the persistence check
-        (ab >= 1 - tol_ab), writes NaN and does not update state for that step.
+    The horizon forecast is the annualized mean of the next `horizon`
+    conditional variances. For GJR, the multi-step expectation assumes
+    symmetric innovations, so P(epsilon < 0) equals 0.5.
 
-    GJR multi-step recursion assumes symmetric innovations, using P(eps < 0) = 0.5 in ab.
+    Converged estimates at the unit-persistence boundary are accepted.
+    Although these estimates do not have a finite unconditional variance,
+    their finite-horizon conditional variance forecasts remain well-defined.
+    Persistence above one beyond numerical tolerance is rejected.
 
-    Returns (forecast_series, diagnostics) where diagnostics summarize refit outcomes.
+    Returns the forecast series and refit diagnostics.
     """
-    if dist not in ("t", "normal"):
-        raise ValueError(f"dist must be 'normal' or 't'.")
     if kind not in ("garch", "gjr"):
         raise ValueError("kind must be 'garch' or 'gjr'")
 
-    cfg = cfg or WalkForwardConfig()
+    returns = data[return_col].dropna().astype(float) * 100.0
+    start = rolling_window
+    forecasts = np.full(len(returns), np.nan)
 
-    out = pd.Series(index=df.index, dtype=float, name=f"{kind}_wf_forecast_var")
+    state: RefitState | None = None
+    attempts = failures = 0
 
-    df2 = df.dropna(subset=[ret_col]).copy()
-    n2 = len(df2)
-
-    start_pos = compute_start_pos(
-        df2.index,
-        cfg=cfg,
-        n_rows=n2,
-        origin_start_date=start_date,
-    )
-
-    # Scaled returns for stable estimation; forecasts scaled back via (ret_scale**2).
-    returns = df2[ret_col] * float(ret_scale)
-
-    tol_ab = 1e-6 
-
-    fitted = False
-    omega = alpha = beta = gamma = None
-    h_prev = None
-    eps_prev = None
-    refit_attempts = 0
-    refit_failures = 0
-
-    # assumes symmetric innovations for GJR horizon recursion (E[I{eps<0}])
-    P_NEG_IMPLIED = 0.5
-
-    for pos in range(start_pos, n2):
-        idx = df2.index[pos]
-        do_refit = (not fitted) or ((pos - start_pos) % cfg.refit_every == 0)
-
-        if do_refit:
-            train_slice = get_train_slice(pos, cfg.window_type, cfg.rolling_window_size)
-            train = returns.iloc[train_slice]
-
-            required_min = cfg.initial_train_size if cfg.window_type == "expanding" else cfg.min_train_size
-
-            if len(train) >= required_min:
-                refit_attempts += 1
-                am = arch_model(
-                    train,
-                    mean="Zero",
-                    vol="GARCH",
-                    p=1,
-                    o=(1 if kind == "gjr" else 0),
-                    q=1,
-                    dist=dist,
-                    rescale=False,
+    for position in range(start, len(returns)):
+        should_refit = (
+            state is None
+            or (position - start) % refit_every == 0
+        )
+        if should_refit:
+            train = returns.iloc[position - rolling_window : position]
+            attempts += 1
+            model = arch_model(
+                train,
+                mean="Zero",
+                vol="GARCH",
+                p=1,
+                o=1 if kind == "gjr" else 0,
+                q=1,
+                dist="t",
+                rescale=False,
+            )
+            try:
+                result = model.fit(disp="off")
+            except (
+                ValueError,
+                FloatingPointError,
+                RuntimeError,
+                np.linalg.LinAlgError,
+            ):
+                failures += 1
+            else:
+                candidate = (
+                    None
+                    if getattr(result, "convergence_flag", 0) != 0
+                    else _validated_refit_state(result, train, kind)
                 )
-
-                try:
-                    res = am.fit(disp="off")
-                except (ValueError, FloatingPointError, RuntimeError, np.linalg.LinAlgError):
-                    res = None
-                    refit_failures += 1
+                if candidate is None:
+                    failures += 1
                 else:
-                    if getattr(res, "convergence_flag", 0) != 0:
-                        res = None
-                        refit_failures += 1
+                    state = candidate
 
-                if res is not None:
-                    cand = _build_refit_candidate(
-                        res=res,
-                        train=train,
-                        kind=kind,
-                        p_neg=P_NEG_IMPLIED,
-                        tol_ab=tol_ab,
-                    ) 
-                    if cand is not None:
-                        omega, alpha, beta, gamma, h_prev, eps_prev = cand
-                        fitted = True
-                    else:
-                        refit_failures += 1
-                                         
-        if not fitted:
+        if state is None:
             continue
 
-        Ineg = 1.0 if eps_prev < 0.0 else 0.0
-        if kind == "garch":
-            h_t = omega + alpha * (eps_prev ** 2) + beta * h_prev
-            ab = alpha + beta
-        else:
-            h_t = omega + (alpha + gamma * Ineg) * (eps_prev ** 2) + beta * h_prev
-            ab = alpha + beta + gamma * P_NEG_IMPLIED
-
-        if (not np.isfinite(h_t)) or (h_t <= 0.0) or (not np.isfinite(ab)) or (ab >= 1.0 - tol_ab):
-            out.loc[idx] = np.nan
+        (
+            omega,
+            alpha,
+            beta,
+            gamma,
+            h_previous,
+            shock_previous,
+        ) = state
+        asymmetry = gamma if kind == "gjr" and shock_previous < 0.0 else 0.0
+        h_today = (
+            omega
+            + (alpha + asymmetry) * shock_previous**2
+            + beta * h_previous
+        )
+        persistence = min(
+            alpha + beta + (0.5 * gamma if kind == "gjr" else 0.0),
+            1.0,
+        )
+        if not np.isfinite(h_today) or h_today <= 0.0:
             continue
 
-        h_path = np.empty(horizon, dtype=float)
-        h_path[0] = h_t
-        for k in range(1, horizon):
-            h_path[k] = omega + ab * h_path[k - 1]
+        horizon_path = np.empty(horizon)
+        horizon_path[0] = h_today
+        for step in range(1, horizon):
+            horizon_path[step] = (
+                omega + persistence * horizon_path[step - 1]
+            )
+        mean_horizon_variance = float(horizon_path.mean())
+        forecasts[position] = (
+            TRADING_DAYS * mean_horizon_variance / 100.0**2
+        )
 
-        out.loc[idx] = float(252.0 * (h_path.mean() / (ret_scale ** 2)))
+        shock_today = float(returns.iloc[position])
+        state = (
+            omega,
+            alpha,
+            beta,
+            gamma,
+            h_today,
+            shock_today,
+        )
 
-        if pos < n2 - 1:
-            eps_prev = float(returns.iloc[pos])
-            h_prev = float(h_t)
-
-    diag = {
-        "refit_attempts": int(refit_attempts),
-        "refit_failures": int(refit_failures),
+    output = pd.Series(forecasts, index=returns.index, name=output_name)
+    return output.reindex(data.index), {
+        "refit_attempts": attempts,
+        "refit_failures": failures,
     }
-    return out, diag

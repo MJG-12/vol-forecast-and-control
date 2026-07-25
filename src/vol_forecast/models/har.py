@@ -1,105 +1,96 @@
 import numpy as np
 import pandas as pd
-from vol_forecast.wf_config import WalkForwardConfig
-from vol_forecast.schema import require_cols
-from .wf_util import (get_train_slice,
-                       compute_start_pos,
-                       compute_train_end_excl)
 import statsmodels.api as sm
 
 
-def fit_log_har_var_generic(train_df: pd.DataFrame, feature_cols: list[str], y_col: str):
-    """Fits OLS on y_col ~ const + feature_cols; returns (model, residual variance sigma2)."""
-    X = sm.add_constant(train_df[feature_cols], has_constant="add")
-    y = train_df[y_col]
-    model = sm.OLS(y, X).fit()
-    sigma2 = float(model.mse_resid)
-    return model, sigma2
+def _fit_log_har(
+    features: np.ndarray,
+    target: np.ndarray,
+):
+    """Fits OLS and returns the model plus residual variance."""
+    design = sm.add_constant(features, has_constant="add")
+    model = sm.OLS(target, design).fit()
+    return model, float(model.mse_resid)
 
 
-def predict_log_har_var_generic(df: pd.DataFrame, model, sigma2: float, feature_cols: list[str]) -> pd.Series:
-    """Produces variance-scale forecasts using the lognormal-mean mapping from the fitted log model."""
-    X = sm.add_constant(df[feature_cols], has_constant="add")
-    X = X[model.model.exog_names]
-    mu = model.predict(X)
-    return np.exp(mu + 0.5 * sigma2)
+def _predict_log_har(
+    model,
+    sigma2: float,
+    features: np.ndarray,
+) -> np.ndarray:
+    """Produces variance forecasts for a block of HAR predictors."""
+    design = sm.add_constant(features, has_constant="add")
+    log_forecast = np.asarray(model.predict(design), dtype=float)
+    return np.exp(log_forecast + 0.5 * sigma2)
 
 
-def walk_forward_log_har_var_generic(
-    df: pd.DataFrame,
+def walk_forward_har(
+    data: pd.DataFrame,
     *,
-    feature_cols: list[str],
-    target_log_col: str,
-    target_var_col: str,
+    feature_cols: tuple[str, ...],
+    log_target_col: str,
     horizon: int,
-    out_name: str,
-    cfg: WalkForwardConfig|None = None,
-    start_date: pd.Timestamp | None = None,
+    rolling_window: int,
+    refit_every: int,
+    output_name: str,
 ) -> tuple[pd.Series, dict[str, int]]:
     """
-    Walk-forward HAR regression on a log-variance target.
+    Produces leakage-safe rolling HAR forecasts on the variance scale.
 
-    Forecasts are aligned at origin t (variance scale). Predictors are assumed t-1 aligned (known by close of t-1),
-    while the label is the forward variance over t..t+h-1.
+    Forecasts are aligned at origin t. Predictors use information through
+    t-1, while the label is forward variance over t through t+h-1.
 
-    Refits every cfg.refit_every origins using a leakage-safe training cutoff (compute_train_end_excl).
-    If a refit fails, the last valid fit is retained and forecasting continues.
+    The model is refitted every `refit_every` origins using a fixed rolling
+    window and a purged training cutoff. If a refit fails, the last valid
+    fit is retained and forecasting continues. Forecasting begins at the
+    first origin that leaves one complete purged rolling window.
 
-    Maps log forecasts to variance via the lognormal mean: exp(mu + 0.5 * sigma2), where sigma2 is the
-    OLS residual variance (mse_resid) on the log-target scale for the current training window.
+    Log forecasts are mapped to variance using the lognormal mean
+    exp(mu + 0.5 * sigma2), where sigma2 is the OLS residual variance.
 
-    Returns (forecast_series, diagnostics) where diagnostics summarize refit outcomes.
+    Returns the forecast series and refit diagnostics.
     """
-    cfg = cfg or WalkForwardConfig()
-    out = pd.Series(index=df.index, dtype=float, name=out_name)
-    require_cols(df.columns, list(feature_cols) + [target_log_col, target_var_col], context="walk_forward_log_har_var_generic")
+    required = [*feature_cols, log_target_col]
+    valid = data[required].dropna()
+    start = rolling_window + horizon - 1
+    feature_values = valid[list(feature_cols)].to_numpy(dtype=float)
+    target_values = valid[log_target_col].to_numpy(dtype=float)
+    forecasts = np.full(len(valid), np.nan)
 
-    needed = list(feature_cols) + [target_log_col, target_var_col]
-    df2 = df.dropna(subset=needed).copy()
-    n2 = len(df2)
+    model = None
+    sigma2 = float("nan")
+    attempts = failures = 0
 
-    start_pos = compute_start_pos(
-        df2.index,
-        cfg=cfg,
-        n_rows=n2,
-        origin_start_date=start_date,
-    )
-    model, sigma2 = None, 0.0
-    refit_attempts = 0
-    refit_failures = 0
+    for block_start in range(start, len(valid), refit_every):
+        # A label at origin j uses j..j+h-1, so the last admissible
+        # training origin is block_start-horizon.
+        train_end = block_start - horizon + 1
+        train_slice = slice(train_end - rolling_window, train_end)
 
-    for pos in range(start_pos, n2):
-        train_end_excl = compute_train_end_excl(pos, horizon=horizon)
-
-        do_refit = (model is None) or ((pos - start_pos) % cfg.refit_every == 0)
-        if do_refit:
-            train_slice = get_train_slice(train_end_excl, cfg.window_type, cfg.rolling_window_size)
-            train = df2.iloc[train_slice]
-            
-            required_min = cfg.initial_train_size if cfg.window_type == "expanding" else cfg.min_train_size
-
-            if len(train) >= required_min:
-                refit_attempts += 1
-                try:
-                    new_model, new_sigma2 = fit_log_har_var_generic(
-                        train, feature_cols=feature_cols, y_col=target_log_col
-                    )
-                    if np.isfinite(new_sigma2) and new_sigma2 >= 0.0:
-                        model, sigma2 = new_model, float(new_sigma2)
-                    else:
-                        refit_failures += 1
-                except (ValueError, np.linalg.LinAlgError):
-                    refit_failures += 1
+        attempts += 1
+        try:
+            new_model, new_sigma2 = _fit_log_har(
+                feature_values[train_slice],
+                target_values[train_slice],
+            )
+            if not np.isfinite(new_sigma2) or new_sigma2 < 0.0:
+                raise ValueError("invalid HAR residual variance")
+            model, sigma2 = new_model, new_sigma2
+        except (ValueError, np.linalg.LinAlgError):
+            failures += 1
 
         if model is None:
             continue
 
-        row = df2.iloc[[pos]]
-        pred = predict_log_har_var_generic(row, model, sigma2, feature_cols=feature_cols).iloc[0]
-        out.loc[df2.index[pos]] = float(pred)
+        block_end = min(block_start + refit_every, len(valid))
+        forecasts[block_start:block_end] = _predict_log_har(
+            model,
+            sigma2,
+            feature_values[block_start:block_end],
+        )
 
-    diag = {
-        "refit_attempts": int(refit_attempts),
-        "refit_failures": int(refit_failures),
+    output = pd.Series(forecasts, index=valid.index, name=output_name)
+    return output.reindex(data.index), {
+        "refit_attempts": attempts,
+        "refit_failures": failures,
     }
-    return out, diag

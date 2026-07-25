@@ -54,6 +54,7 @@ Thumbs.db
 /runs/
 /artifacts/
 /checkpoints/
+/old/
 
 # Secrets / local config
 .env
@@ -65,4 +66,3 @@ Thumbs.db
 *.pyproj
 *.user
 *.suo
-
