@@ -28,7 +28,7 @@ def build_features(
     """
     Adds the one-day target, EWMA baseline, and lagged HAR components.
 
-    Predictors and baseline forecasts at origin t use returns through t-1.
+    Predictors and baseline forecasts at origin t use information through t-1.
     The target is the annualized squared return at t and is used only as a
     label.
     """

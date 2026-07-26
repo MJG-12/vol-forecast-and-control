@@ -95,7 +95,7 @@ def strategy_statistics(
     simple_returns: pd.Series,
     cash_returns: pd.Series,
 ) -> dict[str, float]:
-    """Computes return, excess-Sharpe, risk, and drawdown statistics."""
+    """Computes return, excess Sharpe, risk, and drawdown statistics."""
     frame = pd.concat(
         {"strategy": simple_returns, "cash": cash_returns},
         axis=1,
