@@ -12,7 +12,7 @@ $$\mathrm{Var}_{\mathrm{realized,ann}}(t) = 252r_t^2$$
 
 - **Timing convention**: at forecast origin $t$, predictors use information available by the close of $t-1$ (no look-ahead).
 - **Experiment design**: leakage-safe walk-forward forecasts evaluated over one common sample.
-- **Models**: RiskMetrics EWMA, [HAR](https://doi.org/10.1016/j.jempfin.2008.07.001), GARCH, and GJR-GARCH. HAR uses daily, weekly, and monthly components of an OHLC range-variance proxy as predictors; the other models retain their standard return-based inputs. Every model forecasts the same squared-return target.
+- **Models**: RiskMetrics EWMA, HAR, GARCH, and GJR-GARCH. HAR uses daily, weekly, and monthly components of an OHLC range-variance proxy as predictors; the other models retain their standard return-based inputs. Every model forecasts the same squared-return target.
 - **Baseline**: RiskMetrics EWMA with the fixed daily decay factor $\lambda=0.94$.
 - **Diagnostics**: QLIKE is the primary variance-forecast loss. RMSE on the volatility scale and Spearman correlation are secondary measures of forecast magnitude and regime ordering. Diebold–Mariano tests describe uncertainty around the QLIKE differences versus EWMA over a HAC lag sensitivity grid.
 - **Backtest**: a capped volatility-control strategy rebalanced daily and evaluated at 0, 1, and 5 bps of one-way cost per traded notional. Risk-adjusted performance is measured using excess returns over the cash proxy.
