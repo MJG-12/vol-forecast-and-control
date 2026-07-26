@@ -1,45 +1,40 @@
 # vol-forecast-and-control
 
-In this project we implement a walk-forward experiment to forecast volatility for equity index returns (default here is S&P 500 Total Return). We evaluate multiple models using loss-based diagnostics during a holdout period and also feed these forecasts into an optional volatility-control backtest with transaction cost sensitivity.
+In this project we implement a walk-forward experiment to forecast one day conditional variance for equity index returns (default here is S&P 500 Total Return). We evaluate forecasts using loss based diagnostics and then use them in a daily volatility control backtest with transaction-cost sensitivity.
 
-The objective is to compare the volatility forecasts of econometric and machine learning models against simple baselines.
+The objective is to compare common conditional volatility models as both statistical forecasts and daily risk control signals after accounting for exposure, turnover, and transaction costs.
 
 ## What we test specifically 
 
-- **Target**: forward realized variance over horizon $h$ (annualized; $h = 20$ trading days here). 
-Let $r_t = \log(P_t / P_{t-1})$ be the daily log return and $f$ be the annualization factor (usually 252). The target is: 
+- **Target**: next day squared return, used as a noisy proxy for latent daily variance and annualized using 252 trading days. Let $r_t = \log(P_t / P_{t-1})$ be the daily log return. The target is:
 
-$$\mathrm{RVar}_{\mathrm{fwd,ann}}(t;h) = \frac{f}{h}\sum_{k=0}^{h-1} r_{t+k}^2$$
+$$\mathrm{Var}_{\mathrm{realized,ann}}(t) = 252r_t^2$$
 
 - **Timing convention**: at forecast origin $t$, predictors use information available by the close of $t-1$ (no look-ahead).
-  The target is aligned back onto $t$ (forward window $t,\ldots,t+h-1$). Strategy execution can optionally apply an extra delay via `execution_lag_days`.
-- **Experiment design**: walk-forward training with a fixed holdout segment for headline comparisons.
-- **Models**: HAR-type models, GARCH variants (including GJR-GARCH) and XGBoost-based forecasters (HAR-only and HAR+VIX variants).
-- **Baseline**: Random-walk baseline on variance.
-- **Diagnostics**: Loss-based evaluation (QLIKE on variance; RMSE on volatility) and Diebold–Mariano (DM) tests vs baseline using HAC standard errors across a lag grid (sensitivity check). Headline comparisons use QLIKE (primary) and RMSE (supporting); DM results are reported for context.
-- **Backtest (optional)**: a volatility-control backtest driven by the forecasts and evaluated across a grid of transaction costs. This requires a cash return series and can report multiple execution variants (daily with turnover buffer or tranche-style rebalancing). Execution timing is controlled via `execution_lag_days` (an extra lag beyond the t-1 predictor alignment).
+- **Experiment design**: leakage-safe walk-forward forecasts evaluated over one common sample.
+- **Models**: RiskMetrics EWMA, [HAR](https://doi.org/10.1016/j.jempfin.2008.07.001), GARCH, and GJR-GARCH. HAR uses daily, weekly, and monthly components of an OHLC range-variance proxy as predictors; the other models retain their standard return-based inputs. Every model forecasts the same squared-return target.
+- **Baseline**: RiskMetrics EWMA with the fixed daily decay factor $\lambda=0.94$.
+- **Diagnostics**: QLIKE is the primary variance-forecast loss. RMSE on the volatility scale and Spearman correlation are secondary measures of forecast magnitude and regime ordering. Diebold–Mariano tests describe uncertainty around the QLIKE differences versus EWMA over a HAC lag sensitivity grid.
+- **Backtest**: a capped volatility-control strategy rebalanced daily and evaluated at 0, 1, and 5 bps of one-way cost per traded notional. Risk-adjusted performance is measured using excess returns over the cash proxy.
 
 
 ## Results
 
-The primary output of this repository is the results notebook, which contains the tables, figures, and the narrative for the holdout evaluation and strategy sensitivity analysis.
+The primary output of this repository is the results notebook, which contains the tables and narrative for the forecast evaluation and strategy sensitivity analysis.
 
 * **Main results notebook:** `notebooks/01_results.ipynb`
 
-The source code in `src/vol_forecast/` is structured to keep the notebook thin and make refactoring convenient. 
+In the saved run, GJR has the lowest QLIKE. GARCH also keeps realized volatility below the 10% risk budget and has the highest excess Sharpe across cost levels, while EWMA has the lowest turnover and the shallowest drawdown. More accurate forecasts help avoid exceeding the volatility ceiling but do not consistently improve every volatility control outcome.
 
-**Illustrative findings (with default config in the notebook):**
-- On HOLDOUT in this run, the GARCH-family (GARCH/GJR) delivers the strongest average QLIKE improvements versus the RW variance baseline, with HAR improving by a smaller margin.
-- XGB variants can be strongly regime-dependent: improvements (when present) may concentrate in sub-periods rather than appearing as a stable gain over the full HOLDOUT.
-- In the vol-control backtest, transaction costs reshuffle rankings through turnover; lower-turnover rebalancing rules (e.g., `band_no_trade`) retain more net performance under costs, with RW + `band_no_trade` taking the top spot at 25 bps in this run.
+The source code in `src/vol_forecast/` is structured to keep the notebook thin. The notebook reports the model rankings under each forecast and strategy metric rather than selecting one model independently of the evaluation criterion.
 
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/MJG-10/vol-forecast-and-control.git
+git clone https://github.com/MJG-12/vol-forecast-and-control.git
 cd vol-forecast-and-control
-python -m venv .venv
+python3 -m venv .venv
 ```
 
 **Activate the virtual environment**
@@ -56,31 +51,18 @@ source .venv/bin/activate
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -e ".[full,dev]"
+python -m pip install -e ".[dev]"
 ```
 
 ## How to run
 
+The results notebook `notebooks/01_results.ipynb` is the single entry point. It runs the workflow step by step:
 
-1. **Notebook run (end-to-end, flexible)**
+- Define the fixed `ExperimentSpec`.
+- Build the canonical experiment dataframe (data loading + return construction + feature/target engineering).
+- Run `compute_experiment_report(df, spec)` to fit the models over the common evaluation sample and produce the forecast and strategy tables.
 
-In the results notebook, we run the workflow step by step:
-
-- Build the canonical experiment dataframe `df` (data loading + return construction + feature/target engineering).
-- (Optional) Run XGB pre-holdout tuning to choose among a small fixed set of parameter configurations.
-- Run `compute_experiment_report(df, ...)` to produce the report dictionary (tables/panels + metadata) used by the notebook.
-
-The notebook-friendly wrapper `run_experiment(...)` performs the same workflow in one call and returns a report dictionary containing the evaluation panels/tables and metadata without plotting or printing anything.
-
-Path: `src/vol_forecast/runner/experiment.py` (`run_experiment`, `compute_experiment_report`)
-
-2. **Script run**
-
-For an end-to-end run that produces console output and optional plots.
-
-Path: `src/vol_forecast/runner/runner_script.py`
-
-This script is a convenience wrapper around the compute pipeline and emits console output and optional plots.
+Path: `src/vol_forecast/experiment.py` (`build_experiment_df`, `compute_experiment_report`)
 
 ## Repository layout
 
@@ -88,21 +70,17 @@ This script is a convenience wrapper around the compute pipeline and emits conso
 
   - `data.py`: Data loading and return calculation helpers.
 
-  - `features.py`: Feature and target construction.
+  - `features.py`: One day target, baseline forecasts, and HAR components.
 
-  - `models/`: Forecasting models (HAR, GARCH, XGB) and walk-forward utilities.
+  - `models/`: HAR and GARCH-family walk-forward forecasters.
 
-  - `models_tuning/`: Optional pre-holdout tuning utilities (candidate grids + selection logic for XGB parameter overrides).
+  - `evaluation.py`: QLIKE, headline forecast metrics, and DM tests.
 
-  - `eval/`: Reporting and statistical comparisons (headline tables, DM panels, diagnostics).
+  - `experiment.py`: Experiment orchestration (dataframe build + report computation).
 
-  - `runner/`: Experiment orchestration (compute pipeline, script wrapper, report I/O).
+  - `strategy.py`: Daily reset volatility control backtest utilities.
 
-  - `strategy.py`: Volatility targeting backtest utilities.
-
-  - `wf_config.py`: Walk-forward configuration.
-
-  - `schema.py`: Canonical column names (`COLS`) shared across modules.
+  - `config.py`: Fixed experiment and estimation-window settings.
 
 - `notebooks/`: Results notebook
 
@@ -111,6 +89,6 @@ This script is a convenience wrapper around the compute pipeline and emits conso
 
 Equity index series: Loaded from Yahoo via `yfinance` (default: `^SP500TR`).
 
-VIX: FRED `VIXCLS` (via `pandas_datareader`).
+S&P 500 OHLC series used by HAR: Yahoo `^GSPC`.
 
-Cash proxy: FRED `DFF` spliced/overwritten with `EFFR` when available, converted to per-period simple returns using ACT/360 conventions and aligned with a 1-trading-day lag.
+Cash proxy: FRED `DFF`, converted to per-period simple returns using ACT/360 conventions and aligned with a 1-trading-day lag.
