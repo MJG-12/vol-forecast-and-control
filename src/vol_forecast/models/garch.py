@@ -56,7 +56,6 @@ def walk_forward_garch(
     *,
     return_col: str,
     kind: GarchKind,
-    horizon: int,
     rolling_window: int,
     refit_every: int,
     output_name: str,
@@ -70,13 +69,9 @@ def walk_forward_garch(
     fitted state is retained and forecasting continues. Forecasting begins
     immediately after the first complete rolling window.
 
-    The horizon forecast is the annualized mean of the next `horizon`
-    conditional variances. For GJR, the multi-step expectation assumes
-    symmetric innovations, so P(epsilon < 0) equals 0.5.
-
     Converged estimates at the unit-persistence boundary are accepted.
     Although these estimates do not have a finite unconditional variance,
-    their finite-horizon conditional variance forecasts remain well-defined.
+    their one-step conditional variance forecasts remain well-defined.
     Persistence above one beyond numerical tolerance is rejected.
 
     Returns the forecast series and refit diagnostics.
@@ -146,22 +141,11 @@ def walk_forward_garch(
             + (alpha + asymmetry) * shock_previous**2
             + beta * h_previous
         )
-        persistence = min(
-            alpha + beta + (0.5 * gamma if kind == "gjr" else 0.0),
-            1.0,
-        )
         if not np.isfinite(h_today) or h_today <= 0.0:
             continue
 
-        horizon_path = np.empty(horizon)
-        horizon_path[0] = h_today
-        for step in range(1, horizon):
-            horizon_path[step] = (
-                omega + persistence * horizon_path[step - 1]
-            )
-        mean_horizon_variance = float(horizon_path.mean())
         forecasts[position] = (
-            TRADING_DAYS * mean_horizon_variance / 100.0**2
+            TRADING_DAYS * h_today / 100.0**2
         )
 
         shock_today = float(returns.iloc[position])

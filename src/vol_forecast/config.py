@@ -7,16 +7,13 @@ class ExperimentSpec:
 
     data_start: str = "2004-01-01"
     data_end: str | None = "2026-02-06"
-    horizon: int = 20
     rolling_window: int = 1000
     refit_every: int = 60
-    hac_lags: tuple[int, ...] = (20, 30, 40, 60)
+    hac_lags: tuple[int, ...] = (0, 5, 20)
     target_volatility: float = 0.10
-    costs_bps: tuple[float, ...] = (0.0, 10.0, 25.0)
+    costs_bps: tuple[float, ...] = (0.0, 1.0, 5.0)
 
     def __post_init__(self) -> None:
-        if self.horizon <= 0:
-            raise ValueError("horizon must be positive")
         if self.target_volatility <= 0.0:
             raise ValueError("target_volatility must be positive")
         if self.rolling_window <= 0:

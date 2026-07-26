@@ -45,6 +45,39 @@ def load_sp500_total_return_close(
     return close
 
 
+def load_sp500_price_ohlc(
+    start_date: str,
+    end_date: str | None,
+) -> pd.DataFrame:
+    """Loads S&P 500 price-index open, high, low, and close data from Yahoo."""
+    data = yf.download(
+        "^GSPC",
+        start=start_date,
+        end=end_date,
+        auto_adjust=True,
+        group_by="column",
+        progress=False,
+    )
+    if isinstance(data.columns, pd.MultiIndex):
+        data = data.copy()
+        data.columns = [
+            col[0] if isinstance(col, tuple) else col
+            for col in data.columns
+        ]
+    data = _standardize_time_index(data)
+    columns = ["Open", "High", "Low", "Close"]
+    if data.empty or any(column not in data for column in columns):
+        raise ValueError(
+            f"Yahoo returned no S&P 500 OHLC data in "
+            f"[{start_date}, {end_date}]"
+        )
+
+    output = data[columns].apply(pd.to_numeric, errors="coerce")
+    output = output.where(output > 0.0)
+    output.columns = ["price_open", "price_high", "price_low", "price_close"]
+    return output
+
+
 def compute_log_returns(
     prices: pd.Series,
     *,

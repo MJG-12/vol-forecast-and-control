@@ -60,7 +60,7 @@ def forecast_metrics(
                 "model": column,
                 "n": len(panel),
                 "qlike": qlike,
-                "delta_qlike_vs_rolling": qlike - baseline_qlike,
+                "delta_qlike_vs_ewma": qlike - baseline_qlike,
                 "rmse_vol": rmse_vol,
                 "spearman_vol": spearman_vol,
             }
@@ -95,7 +95,7 @@ def dm_tests(
     hac_lags: tuple[int, ...],
 ) -> pd.DataFrame:
     """
-    Computes QLIKE Diebold-Mariano tests versus the rolling baseline.
+    Computes QLIKE Diebold-Mariano tests versus the EWMA baseline.
 
     Tests are reported over a HAC lag grid. The loss differential is model
     QLIKE minus baseline QLIKE, so a negative mean indicates lower loss.
