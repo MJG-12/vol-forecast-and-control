@@ -1,4 +1,4 @@
-# Volatility Forecasting and Risk Control
+# Volatility Forecasting and Control
 
 Do more accurate daily variance forecasts produce better volatility-control
 outcomes?
