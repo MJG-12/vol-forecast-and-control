@@ -1,94 +1,146 @@
-# vol-forecast-and-control
+# Volatility Forecasting and Risk Control
 
-In this project we implement a walk-forward experiment to forecast one day conditional variance for equity index returns (default here is S&P 500 Total Return). We evaluate forecasts using loss based diagnostics and then use them in a daily volatility control backtest with transaction-cost sensitivity.
+Do more accurate daily variance forecasts produce better volatility-control
+outcomes?
 
-The objective is to compare common conditional volatility models as both statistical forecasts and daily risk control signals after accounting for exposure, turnover, and transaction costs.
+This project compares RiskMetrics EWMA, HAR, GARCH and GJR-GARCH in a common
+walk-forward experiment on S&P 500 Total Return data. Forecasts are evaluated
+statistically using QLIKE and Diebold–Mariano tests, then passed through the
+same capped daily volatility-control policy with 0–5 bps one-way transaction
+costs.
 
-## What we test specifically 
+GJR is the strongest variance forecaster, but plain GARCH is the better
+volatility-control strategy. Both keep realized volatility below the 10%
+budget; relative to GJR, GARCH produces higher returns and Sharpe, lower
+turnover and a shallower drawdown at every tested cost. Incremental forecast
+accuracy therefore does not necessarily improve the overall control outcome
+once the risk objective is already met.
 
-- **Target**: next day squared return, used as a noisy proxy for latent daily variance and annualized using 252 trading days. Let $r_t = \log(P_t / P_{t-1})$ be the daily log return. The target is:
-
-$$\mathrm{Var}_{\mathrm{realized,ann}}(t) = 252r_t^2$$
-
-- **Timing convention**: at forecast origin $t$, predictors use information available by the close of $t-1$ (no look-ahead).
-- **Experiment design**: leakage-safe walk-forward forecasts evaluated over one common sample.
-- **Models**: RiskMetrics EWMA, HAR, GARCH, and GJR-GARCH. HAR uses daily, weekly, and monthly components of an OHLC range-variance proxy as predictors; the other models retain their standard return-based inputs. Every model forecasts the same squared-return target.
-- **Baseline**: RiskMetrics EWMA with the fixed daily decay factor $\lambda=0.94$.
-- **Diagnostics**: QLIKE is the primary variance-forecast loss. RMSE on the volatility scale and Spearman correlation are secondary measures of forecast magnitude and regime ordering. Diebold–Mariano tests describe uncertainty around the QLIKE differences versus EWMA over a HAC lag sensitivity grid.
-- **Backtest**: a capped volatility-control strategy rebalanced daily and evaluated at 0, 1, and 5 bps of one-way cost per traded notional. Risk-adjusted performance is measured using excess returns over the cash proxy.
-
+The [results notebook](notebooks/01_results.ipynb) contains the complete
+methodology, tables and interpretation.
 
 ## Results
 
-The primary output of this repository is the results notebook, which contains the tables and narrative for the forecast evaluation and strategy sensitivity analysis.
+All models are evaluated on the same 4,535-observation walk-forward sample.
+Lower QLIKE and volatility RMSE are better; higher Spearman correlation is
+better.
 
-* **Main results notebook:** `notebooks/01_results.ipynb`
+| Model | QLIKE | Difference from EWMA | Volatility RMSE | Spearman |
+|---|---:|---:|---:|---:|
+| GJR-GARCH | 1.573 | -0.0926 | 0.1368 | 0.425 |
+| HAR | 1.585 | -0.0801 | 0.1496 | 0.411 |
+| GARCH | 1.618 | -0.0472 | 0.1389 | 0.378 |
+| EWMA | 1.665 | 0.0000 | 0.1416 | 0.362 |
 
-In the saved run, GJR has the lowest QLIKE. GARCH also keeps realized volatility below the 10% risk budget and has the highest excess Sharpe across cost levels, while EWMA has the lowest turnover and the shallowest drawdown. More accurate forecasts help avoid exceeding the volatility ceiling but do not consistently improve every volatility control outcome.
+GJR ranks first on all three forecast metrics. HAR ranks second by QLIKE and
+regime ordering but has the weakest volatility scale RMSE. Every alternative
+has lower average QLIKE than EWMA, and the direction of each loss difference
+is unchanged across Newey–West lags of 0, 5 and 20.
 
-The source code in `src/vol_forecast/` is structured to keep the notebook thin. The notebook reports the model rankings under each forecast and strategy metric rather than selecting one model independently of the evaluation criterion.
+The same forecasts then determine the risky weight in a daily-reset,
+unlevered 10% volatility-control strategy. At 1 bp one-way:
 
+| Model | Annual return | Excess Sharpe | Realized volatility | Max drawdown | Annual turnover |
+|---|---:|---:|---:|---:|---:|
+| GARCH | 8.35% | 0.731 | 9.70% | -19.01% | 8.29x |
+| HAR | 8.00% | 0.717 | 9.40% | -20.39% | 14.28x |
+| EWMA | 8.27% | 0.703 | 10.03% | -18.51% | 4.24x |
+| GJR-GARCH | 7.96% | 0.697 | 9.65% | -19.45% | 9.24x |
 
-## Quickstart
+GARCH has the highest excess Sharpe at 0, 1 and 5 bps despite ranking only
+third on QLIKE. More importantly, it dominates the statistically more accurate
+GJR on every reported strategy dimension except realized volatility, where
+both are already below budget and differ by only 0.05 percentage points. HAR's
+high turnover erodes its zero-cost advantage as costs rise. EWMA remains
+competitive because it trades least and records the shallowest drawdown.
+
+All four policies reduce realized volatility from 19.99% for buy-and-hold to
+approximately the 10% risk budget. The relevant question is therefore not only
+which model forecasts variance most accurately, but which one meets the risk
+budget with the strongest return, turnover and drawdown trade-off.
+
+## Experimental design
+
+- **Data:** S&P 500 Total Return closes and S&P 500 OHLC data from January 2004
+  through 5 February 2026.
+- **Target:** next-day squared log return, annualized using 252 trading days,
+  as a noisy proxy for latent daily variance.
+- **Timing:** every forecast uses information available by the previous close.
+- **Evaluation:** one common walk-forward sample after a 1,000-observation
+  training window; HAR, GARCH and GJR are refitted every 60 observations.
+- **Baseline:** RiskMetrics EWMA with fixed daily decay
+  \(\lambda=0.94\).
+- **Alternatives:** HAR using lagged 1/5/22-day range-variance components, plus
+  GARCH and GJR-GARCH with Student-\(t\) innovations.
+- **Primary loss:** QLIKE on the variance scale. Volatility RMSE and Spearman
+  correlation are secondary diagnostics.
+- **Uncertainty:** Diebold–Mariano comparisons against EWMA with Newey–West
+  lags of 0, 5 and 20.
+
+The strategy allocates between the equity index and a lagged overnight cash
+proxy:
+
+\[
+w_t=\min\left(1,\frac{0.10}{\widehat{\sigma}_t}\right).
+\]
+
+The weight is reset daily and cannot exceed 100% equity. Transaction costs are
+charged per one-way unit of drift-adjusted turnover. Strategy Sharpe ratios use
+returns in excess of the cash proxy.
+
+## Repository
+
+```text
+src/vol_forecast/
+  data.py        market and cash data
+  features.py    targets, EWMA and HAR components
+  models/        walk-forward HAR and GARCH-family forecasts
+  evaluation.py  QLIKE metrics and Diebold–Mariano tests
+  strategy.py    capped volatility-control backtest
+  experiment.py  shared experiment orchestration
+  config.py      fixed experiment settings
+notebooks/
+  01_results.ipynb
+tests/
+```
+
+The notebook is intentionally a thin presentation layer; the forecasting,
+evaluation and strategy logic lives in the installable package.
+
+## Reproduction
 
 ```bash
 git clone https://github.com/MJG-12/vol-forecast-and-control.git
 cd vol-forecast-and-control
 python3 -m venv .venv
-```
-
-**Activate the virtual environment**
-
-```powershell
-. .\.venv\Scripts\Activate.ps1
-```
-
-```bash
 source .venv/bin/activate
-```
-
-**Install**
-
-```bash
-python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
+jupyter notebook notebooks/01_results.ipynb
 ```
 
-## How to run
+On Windows, activate the environment with
+`.venv\Scripts\Activate.ps1` in PowerShell.
 
-The results notebook `notebooks/01_results.ipynb` is the single entry point. It runs the workflow step by step:
+Data are downloaded from public sources:
 
-- Define the fixed `ExperimentSpec`.
-- Build the canonical experiment dataframe (data loading + return construction + feature/target engineering).
-- Run `compute_experiment_report(df, spec)` to fit the models over the common evaluation sample and produce the forecast and strategy tables.
+- S&P 500 Total Return index: Yahoo Finance `^SP500TR`.
+- S&P 500 OHLC series used by HAR: Yahoo Finance `^GSPC`.
+- Cash proxy: FRED effective federal funds rate `DFF`, converted using
+  ACT/360 and aligned with a one-trading-day lag.
 
-Path: `src/vol_forecast/experiment.py` (`build_experiment_df`, `compute_experiment_report`)
+## Scope
 
-## Repository layout
+The experiment concerns one equity index, a one-day forecast horizon and one
+capped volatility-control policy. Squared daily returns are a noisy variance
+proxy, and strategy rankings reflect both the forecast and the realized return
+path. The conclusion is therefore specific: when several models already meet
+the risk budget, additional forecast accuracy need not improve the strategy's
+overall return, turnover and drawdown trade-off.
 
-- `src/vol_forecast/`: Installable package (src layout)
+## AI assistance
 
-  - `data.py`: Data loading and return calculation helpers.
-
-  - `features.py`: One day target, baseline forecasts, and HAR components.
-
-  - `models/`: HAR and GARCH-family walk-forward forecasters.
-
-  - `evaluation.py`: QLIKE, headline forecast metrics, and DM tests.
-
-  - `experiment.py`: Experiment orchestration (dataframe build + report computation).
-
-  - `strategy.py`: Daily reset volatility control backtest utilities.
-
-  - `config.py`: Fixed experiment and estimation-window settings.
-
-- `notebooks/`: Results notebook
-
-
-## Data sources
-
-Equity index series: Loaded from Yahoo via `yfinance` (default: `^SP500TR`).
-
-S&P 500 OHLC series used by HAR: Yahoo `^GSPC`.
-
-Cash proxy: FRED `DFF`, converted to per-period simple returns using ACT/360 conventions and aligned with a 1-trading-day lag.
+OpenAI Codex assisted with research discussion, implementation and refactoring,
+debugging, analysis, code review and writing. The author initiated and directed
+the project, contributed substantial portions of the implementation, reviewed
+the outputs and takes responsibility for the final code, results and
+conclusions.
